@@ -18,6 +18,7 @@ export type Folder = {
   name: string
   order: number
   createdAt: number
+  updatedAt: number
 }
 
 export type SortField = 'manual' | 'title' | 'createdAt' | 'updatedAt'

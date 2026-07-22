@@ -2,6 +2,8 @@
 
 MdRWerは、Markdown Reader and Writerを略した名前です。文章を「読む」体験を中心に設計したローカルファーストのMarkdownノートPWAで、縦スクロールで読み、左右スワイプでノートをめくれます。サーバーは不要で、ノートはブラウザのIndexedDBに保存されます。
 
+Google Driveを使ったAndroid・iPad間の同期にも対応しています。初期設定は [Google Drive同期の設定手順](GOOGLE_DRIVE_SETUP.md) を参照してください。
+
 ## 実装済みの機能
 
 - ノートの作成、閲覧、編集、自動保存、削除

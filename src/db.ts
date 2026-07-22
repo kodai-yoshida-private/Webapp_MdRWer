@@ -23,7 +23,7 @@ db.version(3).stores({
   const notes = await transaction.table<Note>('notes').toArray()
   const names = [...new Set(notes.map(note => note.folder).filter(Boolean))]
   await transaction.table<Folder>('folders').bulkAdd(names.map((name, order) => ({
-    id: createNoteId(), name, order, createdAt: Date.now()
+    id: createNoteId(), name, order, createdAt: Date.now(), updatedAt: Date.now()
   })))
 })
 db.version(4).stores({
@@ -31,6 +31,14 @@ db.version(4).stores({
   folders: 'id, &name, order'
 }).upgrade(async transaction => {
   await transaction.table<Note>('notes').toCollection().modify(note => { note.tags = note.tags || [] })
+})
+db.version(5).stores({
+  notes: 'id, updatedAt, order, folder, favorite, *tags',
+  folders: 'id, &name, order'
+}).upgrade(async transaction => {
+  await transaction.table<Folder>('folders').toCollection().modify(folder => {
+    folder.updatedAt = folder.updatedAt || folder.createdAt || Date.now()
+  })
 })
 
 export const starterNotes: Note[] = [
@@ -102,7 +110,7 @@ export async function ensureStarterNotes() {
   const missing = [...new Set(notes.map(note => note.folder).filter(Boolean))].filter(name => !known.has(name))
   if (missing.length) {
     await db.folders.bulkAdd(missing.map((name, index) => ({
-      id: createNoteId(), name, order: folders.length + index, createdAt: Date.now()
+      id: createNoteId(), name, order: folders.length + index, createdAt: Date.now(), updatedAt: Date.now()
     })))
   }
 }

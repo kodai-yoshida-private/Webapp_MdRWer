@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Archive, ArrowDownUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight,
+  Archive, ArrowDownUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, Cloud,
   ChevronUp, Download, FileDown, FileUp, Folder, FolderCog, FolderInput,
-  FolderPlus, Grid2X2, Heart, List, Menu, MoreHorizontal, Pencil, Plus, Search,
+  FolderPlus, Grid2X2, Heart, List, Menu, MoreHorizontal, Pencil, Plus, RefreshCw, Search,
   Settings as SettingsIcon, Sidebar, Star, Tag, Trash2, X
 } from 'lucide-react'
 import { db, ensureStarterNotes } from './db'
@@ -10,11 +10,16 @@ import { createNoteId } from './id'
 import { excerpt, titleFromContent } from './markdown'
 import { MarkdownView } from './MarkdownView'
 import { createBackupData, createZipBackup, readZipBackup, sortNotes, type BackupData } from './phase2'
+import {
+  connectGoogleDrive, createDriveSnapshot, disconnectGoogleDrive, isGoogleDriveConfigured,
+  recordDriveDeletion, syncWithGoogleDrive, wasGoogleDriveConnected, type DriveSnapshot
+} from './driveSync'
 import { defaultSettings, loadSettings, saveSettings } from './settings'
 import type { AppSettings, Folder as NoteFolder, Note, ViewMode } from './types'
 
 const SWIPE_RATIO = 1.25
 const appIconUrl = `${import.meta.env.BASE_URL}icon-192-v3.png`
+type DriveStatus = 'not-configured' | 'disconnected' | 'connecting' | 'syncing' | 'synced' | 'offline' | 'error'
 
 function newNote(order: number): Note {
   const now = Date.now()
@@ -30,6 +35,17 @@ function saveFile(blob: Blob, name: string) {
 
 function safeFilename(title: string) {
   return `${title.replace(/[\\/:*?"<>|]/g, '_').trim() || 'note'}.md`
+}
+
+function driveDataSignature(notes: Array<Note | DriveSnapshot['notes'][number]>, folders: NoteFolder[]) {
+  return JSON.stringify({
+    notes: notes.map(note => ({
+      id: note.id, title: note.title, content: note.content, folder: note.folder,
+      createdAt: note.createdAt, updatedAt: note.updatedAt, order: note.order,
+      favorite: note.favorite, tags: note.tags
+    })).sort((a, b) => a.id.localeCompare(b.id)),
+    folders: folders.map(folder => ({ ...folder })).sort((a, b) => a.id.localeCompare(b.id))
+  })
 }
 
 export default function App() {
@@ -53,6 +69,9 @@ export default function App() {
   const [tagDraft, setTagDraft] = useState('')
   const [moveTargetId, setMoveTargetId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [driveStatus, setDriveStatus] = useState<DriveStatus>(() => isGoogleDriveConfigured() ? 'disconnected' : 'not-configured')
+  const [driveMessage, setDriveMessage] = useState(() => wasGoogleDriveConnected() ? 'Google Driveへ再接続してください' : '未接続')
+  const [lastDriveSync, setLastDriveSync] = useState<number | null>(null)
   const [ready, setReady] = useState(false)
   const [toast, setToast] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
@@ -64,6 +83,9 @@ export default function App() {
   const readerRef = useRef<HTMLElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const saveTimer = useRef<number>()
+  const driveTimer = useRef<number>()
+  const driveSyncing = useRef(false)
+  const lastDriveSignature = useRef('')
   const longPressTimer = useRef<number>()
   const longPressTriggered = useRef(false)
   const longPressStart = useRef<{ x: number; y: number } | null>(null)
@@ -125,6 +147,103 @@ export default function App() {
     window.setTimeout(() => setToast(''), 2200)
   }
 
+  const applyDriveSnapshot = async (snapshot: DriveSnapshot) => {
+    const currentNotes = await db.notes.toArray()
+    const scrollPositions = new Map(currentNotes.map(note => [note.id, note.scrollTop || 0]))
+    const syncedNotes: Note[] = snapshot.notes.map(note => ({ ...note, scrollTop: scrollPositions.get(note.id) || 0 }))
+    const foldersByName = new Map<string, NoteFolder>()
+    for (const folder of snapshot.folders) {
+      const existing = foldersByName.get(folder.name)
+      if (!existing || folder.updatedAt > existing.updatedAt) foldersByName.set(folder.name, folder)
+    }
+    const syncedFolders = [...foldersByName.values()].sort((a, b) => a.order - b.order)
+    await db.transaction('rw', db.notes, db.folders, async () => {
+      await Promise.all([db.notes.clear(), db.folders.clear()])
+      if (syncedNotes.length) await db.notes.bulkPut(syncedNotes)
+      if (syncedFolders.length) await db.folders.bulkPut(syncedFolders)
+    })
+    return { syncedNotes, syncedFolders }
+  }
+
+  const performDriveSync = async (notify = false) => {
+    if (driveSyncing.current) return
+    driveSyncing.current = true
+    setDriveStatus(navigator.onLine ? 'syncing' : 'offline')
+    setDriveMessage(navigator.onLine ? '同期しています…' : 'オフラインです')
+    try {
+      const [localNotes, localFolders] = await Promise.all([db.notes.toArray(), db.folders.toArray()])
+      const result = await syncWithGoogleDrive(createDriveSnapshot(localNotes, localFolders))
+      const applied = await applyDriveSnapshot(result.snapshot)
+      lastDriveSignature.current = driveDataSignature(applied.syncedNotes, applied.syncedFolders)
+      await reload(activeId)
+      setDriveStatus('synced')
+      setDriveMessage(result.conflicts ? `${result.conflicts}件の競合コピーを作成しました` : '同期済み')
+      setLastDriveSync(Date.now())
+      if (result.conflicts) flash(`${result.conflicts}件の競合コピーを残しました`)
+      else if (notify) flash('Google Driveと同期しました')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Google Driveと同期できませんでした'
+      setDriveStatus(navigator.onLine ? 'error' : 'offline')
+      setDriveMessage(message)
+      if (notify) flash(message)
+    } finally {
+      driveSyncing.current = false
+    }
+  }
+
+  const connectDrive = async () => {
+    setDriveStatus('connecting')
+    setDriveMessage('Googleアカウントを確認しています…')
+    try {
+      await connectGoogleDrive()
+      await performDriveSync(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Google Driveへ接続できませんでした'
+      setDriveStatus(navigator.onLine ? 'error' : 'offline')
+      setDriveMessage(message)
+      flash(message)
+    }
+  }
+
+  const disconnectDrive = () => {
+    disconnectGoogleDrive()
+    window.clearTimeout(driveTimer.current)
+    setDriveStatus('disconnected')
+    setDriveMessage('未接続')
+    setLastDriveSync(null)
+    flash('Google Driveとの接続を解除しました')
+  }
+
+  const driveChangeSignature = useMemo(() => driveDataSignature(notes, folders), [notes, folders])
+
+  useEffect(() => {
+    if (driveStatus !== 'synced' || driveChangeSignature === lastDriveSignature.current) return
+    window.clearTimeout(driveTimer.current)
+    driveTimer.current = window.setTimeout(() => void performDriveSync(false), 1600)
+    return () => window.clearTimeout(driveTimer.current)
+  }, [driveChangeSignature, driveStatus])
+
+  useEffect(() => {
+    const offline = () => {
+      if (driveStatus === 'synced' || driveStatus === 'syncing') {
+        setDriveStatus('offline')
+        setDriveMessage('オフラインです。変更は端末内に保存されます')
+      }
+    }
+    const online = () => {
+      if (driveStatus === 'offline') {
+        setDriveStatus('disconnected')
+        setDriveMessage('Google Driveへ再接続してください')
+      }
+    }
+    window.addEventListener('offline', offline)
+    window.addEventListener('online', online)
+    return () => {
+      window.removeEventListener('offline', offline)
+      window.removeEventListener('online', online)
+    }
+  }, [driveStatus])
+
   const updateSettings = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings(current => ({ ...current, [key]: value }))
   }
@@ -183,8 +302,9 @@ export default function App() {
 
   const toggleFavorite = async (note: Note) => {
     const favorite = !note.favorite
-    setNotes(current => current.map(item => item.id === note.id ? { ...item, favorite } : item))
-    await db.notes.update(note.id, { favorite })
+    const updatedAt = Date.now()
+    setNotes(current => current.map(item => item.id === note.id ? { ...item, favorite, updatedAt } : item))
+    await db.notes.update(note.id, { favorite, updatedAt })
   }
 
   const createFolder = async () => {
@@ -194,7 +314,8 @@ export default function App() {
       flash('同じ名前のフォルダがあります')
       return
     }
-    await db.folders.add({ id: createNoteId(), name, order: folders.length, createdAt: Date.now() })
+    const now = Date.now()
+    await db.folders.add({ id: createNoteId(), name, order: folders.length, createdAt: now, updatedAt: now })
     setNewFolderName('')
     setSelectedFolder(name)
     setExpandedFolders(current => new Set(current).add(name))
@@ -208,9 +329,10 @@ export default function App() {
       flash('同じ名前のフォルダがあります')
       return
     }
+    const updatedAt = Date.now()
     await db.transaction('rw', db.folders, db.notes, async () => {
-      await db.folders.update(folder.id, { name })
-      await db.notes.where('folder').equals(folder.name).modify({ folder: name })
+      await db.folders.update(folder.id, { name, updatedAt })
+      await db.notes.where('folder').equals(folder.name).modify({ folder: name, updatedAt })
     })
     if (selectedFolder === folder.name) setSelectedFolder(name)
     setExpandedFolders(current => {
@@ -223,8 +345,10 @@ export default function App() {
 
   const deleteFolder = async (folder: NoteFolder) => {
     if (!window.confirm(`「${folder.name}」を削除しますか？\n中のノートは「未分類」へ移動します。`)) return
+    const deletedAt = Date.now()
+    recordDriveDeletion('folders', folder.id, deletedAt)
     await db.transaction('rw', db.folders, db.notes, async () => {
-      await db.notes.where('folder').equals(folder.name).modify({ folder: '' })
+      await db.notes.where('folder').equals(folder.name).modify({ folder: '', updatedAt: deletedAt })
       await db.folders.delete(folder.id)
     })
     if (selectedFolder === folder.name) setSelectedFolder('all')
@@ -248,9 +372,10 @@ export default function App() {
     const target = ordered[index + direction]
     if (!target) return
     const currentOrder = note.order
+    const updatedAt = Date.now()
     await db.transaction('rw', db.notes, async () => {
-      await db.notes.update(note.id, { order: target.order })
-      await db.notes.update(target.id, { order: currentOrder })
+      await db.notes.update(note.id, { order: target.order, updatedAt })
+      await db.notes.update(target.id, { order: currentOrder, updatedAt })
     })
     setNoteMenuId(null)
     await reload(note.id)
@@ -300,9 +425,11 @@ export default function App() {
   const deleteNote = async () => {
     if (!deleteTarget) return
     const deletedIndex = notes.findIndex(note => note.id === deleteTarget.id)
+    recordDriveDeletion('notes', deleteTarget.id)
     await db.notes.delete(deleteTarget.id)
     const remaining = notes.filter(note => note.id !== deleteTarget.id)
-    await Promise.all(remaining.map((note, order) => db.notes.update(note.id, { order })))
+    const reorderedAt = Date.now()
+    await Promise.all(remaining.map((note, order) => db.notes.update(note.id, { order, updatedAt: reorderedAt })))
     const preferredId = activeId === deleteTarget.id
       ? remaining[Math.max(0, deletedIndex - 1)]?.id
       : activeId
@@ -382,7 +509,8 @@ export default function App() {
     let folderOrder = folders.length
     for (const folder of data.folders || []) {
       if (!folder.name || existingFolders.has(folder.name)) continue
-      await db.folders.add({ ...folder, id: createNoteId(), order: folderOrder++, createdAt: folder.createdAt || Date.now() })
+      const now = Date.now()
+      await db.folders.add({ ...folder, id: createNoteId(), order: folderOrder++, createdAt: folder.createdAt || now, updatedAt: now })
       existingFolders.add(folder.name)
     }
     for (const source of data.notes || []) {
@@ -486,7 +614,7 @@ export default function App() {
           ><Menu size={21} /></button>
           <img className="brand-mark small icon-image" src={appIconUrl} alt="" /><span className="brand-name">MdRWer</span>
         </div>
-        <div className="document-title"><span>{active?.title || 'ノートがありません'}</span>{saving && <i>保存中…</i>}</div>
+        <div className="document-title"><span>{active?.title || 'ノートがありません'}</span>{saving && <i>保存中…</i>}{!saving && driveStatus === 'syncing' && <i>DRIVE同期中…</i>}</div>
         <div className="top-actions">
           <button className="icon-button" onClick={addNote} aria-label="新しいノート"><Plus size={21} /></button>
           {active && <button className={`icon-button ${mode === 'edit' ? 'active' : ''}`} onClick={() => setMode(mode === 'edit' ? 'read' : 'edit')} aria-label={mode === 'edit' ? '閲覧に戻る' : '編集する'}>{mode === 'edit' ? <Check size={20} /> : <Pencil size={19} />}</button>}
@@ -596,8 +724,19 @@ export default function App() {
         <div className="move-folder-list"><button className={!moveTarget.folder ? 'active' : ''} onClick={() => void moveNoteToFolder('')}><Folder size={17} />未分類{!moveTarget.folder && <Check size={16} />}</button>{folders.map(folder => <button key={folder.id} className={moveTarget.folder === folder.name ? 'active' : ''} onClick={() => void moveNoteToFolder(folder.name)}><Folder size={17} />{folder.name}{moveTarget.folder === folder.name && <Check size={16} />}</button>)}</div>
       </section></div>}
       {settingsOpen && <div className="settings-layer"><button className="settings-scrim" onClick={() => setSettingsOpen(false)} aria-label="設定を閉じる" /><section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <header><div><span className="eyebrow">DISPLAY</span><h2 id="settings-title"><SettingsIcon size={21} />表示設定</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="閉じる"><X size={19} /></button></header>
+        <header><div><span className="eyebrow">SETTINGS</span><h2 id="settings-title"><SettingsIcon size={21} />設定</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="閉じる"><X size={19} /></button></header>
         <div className="settings-body">
+          <section className={`drive-setting drive-${driveStatus}`} aria-labelledby="drive-setting-title">
+            <div className="drive-setting-heading"><span><Cloud size={19} /></span><div><strong id="drive-setting-title">Google Drive同期</strong><small>{driveMessage}</small></div></div>
+            {driveStatus === 'not-configured' ? <p>公開側のGoogleクライアントIDが未設定です。READMEの手順で設定してください。</p> : <>
+              <div className="drive-setting-actions">
+                {driveStatus === 'synced' ? <button onClick={() => void performDriveSync(true)} disabled={driveSyncing.current}><RefreshCw size={15} />今すぐ同期</button> : <button className="primary" onClick={() => void connectDrive()} disabled={driveStatus === 'connecting' || driveStatus === 'syncing'}><Cloud size={15} />{wasGoogleDriveConnected() ? '再接続して同期' : 'Google Driveと接続'}</button>}
+                {wasGoogleDriveConnected() && <button onClick={disconnectDrive}>接続解除</button>}
+              </div>
+              {lastDriveSync && <time>最終同期：{new Intl.DateTimeFormat('ja', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(lastDriveSync)}</time>}
+              <p>ノートとフォルダを同じGoogleアカウントの端末間で同期します。表示設定は端末ごとに保存されます。</p>
+            </>}
+          </section>
           <label className="setting-row"><span>テーマ<small>端末設定・ライト・ダーク</small></span><select value={settings.theme} onChange={event => updateSettings('theme', event.target.value as AppSettings['theme'])}><option value="system">端末に合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
           <label className="setting-row"><span>本文サイズ<small>{settings.fontSize}px</small></span><input type="range" min="13" max="24" step="1" value={settings.fontSize} onChange={event => updateSettings('fontSize', Number(event.target.value))} /></label>
           <label className="setting-row"><span>行間<small>{settings.lineHeight.toFixed(1)}</small></span><input type="range" min="1.4" max="2.4" step="0.1" value={settings.lineHeight} onChange={event => updateSettings('lineHeight', Number(event.target.value))} /></label>
