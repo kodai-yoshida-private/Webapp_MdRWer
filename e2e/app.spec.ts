@@ -37,9 +37,15 @@ test('タッチ端末の一覧を左スワイプで閉じる', async ({ page }, 
   if (await openButton.isVisible()) await openButton.click()
   const sidebar = page.locator('#note-sidebar')
   await expect(sidebar).toBeVisible()
-  await sidebar.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'touch', clientX: 270, clientY: 180, bubbles: true })
-  await sidebar.dispatchEvent('pointermove', { pointerId: 1, pointerType: 'touch', clientX: 80, clientY: 184, bubbles: true })
-  await sidebar.dispatchEvent('pointerup', { pointerId: 1, pointerType: 'touch', clientX: 80, clientY: 184, bubbles: true })
+  const noteCard = sidebar.locator('.note-card').first()
+  await expect(noteCard).toBeVisible()
+  const bounds = await noteCard.boundingBox()
+  if (!bounds) throw new Error('ノート項目の位置を取得できませんでした')
+  const startX = bounds.x + bounds.width - 20
+  const startY = bounds.y + bounds.height / 2
+  await noteCard.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'touch', clientX: startX, clientY: startY, bubbles: true })
+  await noteCard.dispatchEvent('pointermove', { pointerId: 1, pointerType: 'touch', clientX: startX - 190, clientY: startY + 4, bubbles: true })
+  await noteCard.dispatchEvent('pointerup', { pointerId: 1, pointerType: 'touch', clientX: startX - 190, clientY: startY + 4, bubbles: true })
   await expect(sidebar).toBeHidden()
 })
 

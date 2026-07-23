@@ -81,7 +81,7 @@ export default function App() {
   const [swipeOffset, setSwipeOffset] = useState(0)
   const [sidebarSwipeOffset, setSidebarSwipeOffset] = useState(0)
   const touchStart = useRef<{ x: number; y: number; t: number } | null>(null)
-  const sidebarSwipeStart = useRef<{ x: number; y: number; t: number } | null>(null)
+  const sidebarSwipeStart = useRef<{ x: number; y: number; t: number; pointerId: number } | null>(null)
   const readerRef = useRef<HTMLElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const menuAnchorRef = useRef<HTMLDivElement>(null)
@@ -502,8 +502,10 @@ export default function App() {
     sidebarSwipeStart.current = {
       x: event.clientX,
       y: event.clientY,
-      t: Date.now()
+      t: Date.now(),
+      pointerId: event.pointerId
     }
+    event.currentTarget.setPointerCapture?.(event.pointerId)
     setSidebarSwipeOffset(0)
   }
 
@@ -525,11 +527,17 @@ export default function App() {
       if (mobileList) setMobileList(false)
       else setSidebarOpen(false)
     }
+    if (event.currentTarget.hasPointerCapture?.(sidebarSwipeStart.current.pointerId)) {
+      event.currentTarget.releasePointerCapture(sidebarSwipeStart.current.pointerId)
+    }
     sidebarSwipeStart.current = null
     setSidebarSwipeOffset(0)
   }
 
-  const cancelSidebarSwipe = () => {
+  const cancelSidebarSwipe = (event: React.PointerEvent) => {
+    if (sidebarSwipeStart.current && event.currentTarget.hasPointerCapture?.(sidebarSwipeStart.current.pointerId)) {
+      event.currentTarget.releasePointerCapture(sidebarSwipeStart.current.pointerId)
+    }
     sidebarSwipeStart.current = null
     setSidebarSwipeOffset(0)
   }
@@ -695,7 +703,7 @@ export default function App() {
       <aside
         className={`sidebar ${sidebarSwipeOffset ? 'sidebar-swiping' : ''}`}
         id="note-sidebar"
-        onPointerDown={onSidebarPointerDown}
+        onPointerDownCapture={onSidebarPointerDown}
         onPointerMove={onSidebarPointerMove}
         onPointerUp={onSidebarPointerUp}
         onPointerCancel={cancelSidebarSwipe}

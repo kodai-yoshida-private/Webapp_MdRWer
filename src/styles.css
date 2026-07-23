@@ -41,6 +41,7 @@ button { color: inherit; -webkit-tap-highlight-color: transparent; touch-action:
 .library-tools > button { width: 32px; flex: 0 0 32px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: #fbfaf6; cursor: pointer; }
 .note-count { padding: 18px 24px 8px; color: #93938b; font: 500 9px 'DM Mono'; letter-spacing: .15em; }
 .note-list { overflow: auto; flex: 1; padding: 0 11px 18px; scrollbar-width: thin; }
+.note-list, .note-list * { touch-action: pan-y; }
 .note-tree { padding-top: 0; }
 .folder-node { margin-bottom: 3px; }
 .folder-row { width: 100%; min-height: 40px; display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; cursor: pointer; text-align: left; }
