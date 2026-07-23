@@ -12,7 +12,7 @@ import { MarkdownView } from './MarkdownView'
 import { createBackupData, createZipBackup, readZipBackup, sortNotes, type BackupData } from './phase2'
 import {
   connectGoogleDrive, createDriveSnapshot, disconnectGoogleDrive, isGoogleDriveConfigured,
-  recordDriveDeletion, syncWithGoogleDrive, wasGoogleDriveConnected, type DriveSnapshot
+  mergeDriveSnapshots, recordDriveDeletion, syncWithGoogleDrive, wasGoogleDriveConnected, type DriveSnapshot
 } from './driveSync'
 import { defaultSettings, loadSettings, saveSettings } from './settings'
 import type { AppSettings, Folder as NoteFolder, Note, ViewMode } from './types'
@@ -79,9 +79,12 @@ export default function App() {
   const [noteMenuPosition, setNoteMenuPosition] = useState({ x: 0, y: 0 })
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null)
   const [swipeOffset, setSwipeOffset] = useState(0)
+  const [sidebarSwipeOffset, setSidebarSwipeOffset] = useState(0)
   const touchStart = useRef<{ x: number; y: number; t: number } | null>(null)
+  const sidebarSwipeStart = useRef<{ x: number; y: number; t: number } | null>(null)
   const readerRef = useRef<HTMLElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const menuAnchorRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<number>()
   const driveTimer = useRef<number>()
   const driveSyncing = useRef(false)
@@ -173,9 +176,12 @@ export default function App() {
     try {
       const [localNotes, localFolders] = await Promise.all([db.notes.toArray(), db.folders.toArray()])
       const result = await syncWithGoogleDrive(createDriveSnapshot(localNotes, localFolders))
-      const applied = await applyDriveSnapshot(result.snapshot)
-      lastDriveSignature.current = driveDataSignature(applied.syncedNotes, applied.syncedFolders)
-      await reload(activeId)
+      const [latestNotes, latestFolders] = await Promise.all([db.notes.toArray(), db.folders.toArray()])
+      const latestSnapshot = createDriveSnapshot(latestNotes, latestFolders)
+      const reconciled = mergeDriveSnapshots(latestSnapshot, result.snapshot).snapshot
+      const applied = await applyDriveSnapshot(reconciled)
+      lastDriveSignature.current = driveDataSignature(result.snapshot.notes, result.snapshot.folders)
+      await reload()
       setDriveStatus('synced')
       setDriveMessage(result.conflicts ? `${result.conflicts}件の競合コピーを作成しました` : '同期済み')
       setLastDriveSync(Date.now())
@@ -243,6 +249,22 @@ export default function App() {
       window.removeEventListener('online', online)
     }
   }, [driveStatus])
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const closeOutside = (event: PointerEvent) => {
+      if (!menuAnchorRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    const closeWithEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('keydown', closeWithEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', closeWithEscape)
+    }
+  }, [menuOpen])
 
   const updateSettings = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings(current => ({ ...current, [key]: value }))
@@ -475,6 +497,43 @@ export default function App() {
     touchStart.current = null; setSwipeOffset(0)
   }
 
+  const onSidebarPointerDown = (event: React.PointerEvent) => {
+    if (event.pointerType === 'mouse' || (!mobileList && !sidebarOpen)) return
+    sidebarSwipeStart.current = {
+      x: event.clientX,
+      y: event.clientY,
+      t: Date.now()
+    }
+    setSidebarSwipeOffset(0)
+  }
+
+  const onSidebarPointerMove = (event: React.PointerEvent) => {
+    if (!sidebarSwipeStart.current) return
+    const dx = event.clientX - sidebarSwipeStart.current.x
+    const dy = event.clientY - sidebarSwipeStart.current.y
+    if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.1) {
+      setSidebarSwipeOffset(Math.max(-window.innerWidth, dx))
+    }
+  }
+
+  const onSidebarPointerUp = (event: React.PointerEvent) => {
+    if (!sidebarSwipeStart.current) return
+    const dx = event.clientX - sidebarSwipeStart.current.x
+    const dy = event.clientY - sidebarSwipeStart.current.y
+    const velocity = -dx / Math.max(1, Date.now() - sidebarSwipeStart.current.t)
+    if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.1 && (Math.abs(dx) > 56 || velocity > .45)) {
+      if (mobileList) setMobileList(false)
+      else setSidebarOpen(false)
+    }
+    sidebarSwipeStart.current = null
+    setSidebarSwipeOffset(0)
+  }
+
+  const cancelSidebarSwipe = () => {
+    sidebarSwipeStart.current = null
+    setSidebarSwipeOffset(0)
+  }
+
   const rememberScroll = () => {
     if (!active || !readerRef.current) return
     const top = readerRef.current.scrollTop
@@ -619,7 +678,7 @@ export default function App() {
           <button className="icon-button" onClick={addNote} aria-label="新しいノート"><Plus size={21} /></button>
           {active && <button className={`icon-button ${mode === 'edit' ? 'active' : ''}`} onClick={() => setMode(mode === 'edit' ? 'read' : 'edit')} aria-label={mode === 'edit' ? '閲覧に戻る' : '編集する'}>{mode === 'edit' ? <Check size={20} /> : <Pencil size={19} />}</button>}
           <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="表示設定"><SettingsIcon size={19} /></button>
-          <div className="menu-anchor">
+          <div className="menu-anchor" ref={menuAnchorRef}>
             <button className="icon-button" onClick={() => setMenuOpen(v => !v)} aria-label="その他の操作"><MoreHorizontal size={21} /></button>
             {menuOpen && <div className="action-menu">
               <button onClick={exportNote}><FileDown size={17} />Markdownを書き出す</button>
@@ -633,7 +692,15 @@ export default function App() {
         </div>
       </header>
 
-      <aside className="sidebar" id="note-sidebar">
+      <aside
+        className={`sidebar ${sidebarSwipeOffset ? 'sidebar-swiping' : ''}`}
+        id="note-sidebar"
+        onPointerDown={onSidebarPointerDown}
+        onPointerMove={onSidebarPointerMove}
+        onPointerUp={onSidebarPointerUp}
+        onPointerCancel={cancelSidebarSwipe}
+        style={{ '--sidebar-swipe-x': `${sidebarSwipeOffset}px` } as React.CSSProperties}
+      >
         <div className="sidebar-head"><div><span className="eyebrow">LIBRARY</span><h1>ノート</h1></div><button className="icon-button mobile-only" onClick={() => setMobileList(false)} aria-label="閉じる"><X size={20} /></button></div>
         <label className="search-box"><Search size={17} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="ノートを検索" aria-label="ノートを検索" />{query && <button onClick={() => setQuery('')} aria-label="検索を消去"><X size={14} /></button>}</label>
         <div className="library-tools">
@@ -675,7 +742,7 @@ export default function App() {
           <section className={`editor-view ${settings.editorLayout === 'split' ? 'split' : ''}`}>
             <div className="editor-heading"><span>EDITING</span><input value={active.title} onChange={e => updateActive({ title: e.target.value })} aria-label="ノートのタイトル" /><label className="tag-editor"><Tag size={14} /><input value={tagDraft} onChange={event => setTagDraft(event.target.value)} onBlur={commitTags} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} placeholder="タグをカンマ区切りで入力" aria-label="タグ" /></label></div>
             <div className="format-bar" aria-label="Markdown入力支援">
-              {['# ','**太字**','*斜体*','- ','- [ ] ','> ','`code`','[link](url)'].map(item => <button key={item} onClick={() => updateActive({ content: `${active.content}${active.content.endsWith('\n') ? '' : '\n'}${item}` })}>{item}</button>)}
+              {['# ','**太字**','*斜体*','- ','- [ ] ','> ','`code`','[link](url)','$x_1^2$','$$\n\\frac{a}{b}\n$$'].map(item => <button key={item} onClick={() => updateActive({ content: `${active.content}${active.content.endsWith('\n') ? '' : '\n'}${item}` })}>{item.includes('\\frac') ? '数式ブロック' : item}</button>)}
             </div>
             <div className="editor-workspace">
               <textarea className="editor" value={active.content} onChange={e => updateActive({ content: e.target.value })} spellCheck="true" aria-label="Markdown本文" />

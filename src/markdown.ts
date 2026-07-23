@@ -3,49 +3,82 @@ import taskLists from 'markdown-it-task-lists'
 import DOMPurify from 'dompurify'
 import katex from 'katex'
 
+const katexOptions = {
+  throwOnError: false,
+  strict: false as const,
+  trust: false,
+  output: 'htmlAndMathml' as const
+}
+
+function isEscaped(source: string, position: number) {
+  let slashes = 0
+  for (let index = position - 1; index >= 0 && source[index] === '\\'; index -= 1) slashes += 1
+  return slashes % 2 === 1
+}
+
 function mathPlugin(parser: MarkdownIt) {
-  parser.inline.ruler.after('escape', 'math_inline', (state, silent) => {
-    if (state.src[state.pos] !== '$' || state.src[state.pos + 1] === '$') return false
-    let end = state.pos + 1
-    while ((end = state.src.indexOf('$', end)) !== -1) {
-      if (state.src[end - 1] !== '\\') break
-      end += 1
+  parser.inline.ruler.before('escape', 'math_inline', (state, silent) => {
+    const dollarMath = state.src[state.pos] === '$' && state.src[state.pos + 1] !== '$'
+    const parenthesizedMath = state.src.slice(state.pos, state.pos + 2) === '\\('
+    if (!dollarMath && !parenthesizedMath) return false
+
+    const openerLength = parenthesizedMath ? 2 : 1
+    const closer = parenthesizedMath ? '\\)' : '$'
+    let end = state.pos + openerLength
+    while ((end = state.src.indexOf(closer, end)) !== -1) {
+      if (!isEscaped(state.src, end) || parenthesizedMath) break
+      end += closer.length
     }
-    if (end < 0 || end === state.pos + 1) return false
+    if (end < 0 || end === state.pos + openerLength) return false
     if (!silent) {
       const token = state.push('math_inline', 'math', 0)
-      token.content = state.src.slice(state.pos + 1, end)
+      token.content = state.src.slice(state.pos + openerLength, end)
     }
-    state.pos = end + 1
+    state.pos = end + closer.length
     return true
   })
 
-  parser.block.ruler.after('blockquote', 'math_block', (state, startLine, endLine, silent) => {
+  parser.block.ruler.before('fence', 'math_block', (state, startLine, endLine, silent) => {
     const start = state.bMarks[startLine] + state.tShift[startLine]
     const maximum = state.eMarks[startLine]
-    if (state.src.slice(start, start + 2) !== '$$') return false
+    const firstLine = state.src.slice(start, maximum)
+    const dollarMath = firstLine.startsWith('$$')
+    const bracketMath = firstLine.startsWith('\\[')
+    const environment = firstLine.match(/^\\begin\{(equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|flalign\*?|aligned|gathered|cases|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix)\}/)?.[1]
+    if (!dollarMath && !bracketMath && !environment) return false
     if (silent) return true
+
+    const openerLength = environment ? 0 : 2
+    const closer = environment ? `\\end{${environment}}` : dollarMath ? '$$' : '\\]'
     let nextLine = startLine
-    let content = state.src.slice(start + 2, maximum)
-    if (content.trimEnd().endsWith('$$')) content = content.trimEnd().slice(0, -2)
-    else {
+    let content = firstLine.slice(openerLength)
+    let closed = content.trimEnd().endsWith(closer)
+    if (closed) {
+      content = content.trimEnd().slice(0, -closer.length)
+      if (environment) content = `${firstLine.slice(0, firstLine.length - closer.length)}${closer}`
+    } else {
       const lines: string[] = [content]
       while (++nextLine < endLine) {
         const lineStart = state.bMarks[nextLine] + state.tShift[nextLine]
         const line = state.src.slice(lineStart, state.eMarks[nextLine])
-        if (line.trimEnd().endsWith('$$')) { lines.push(line.trimEnd().slice(0, -2)); break }
+        if (line.trimEnd().endsWith(closer)) {
+          lines.push(environment ? line : line.trimEnd().slice(0, -closer.length))
+          closed = true
+          break
+        }
         lines.push(line)
       }
       content = lines.join('\n')
     }
+    if (!closed) return false
     const token = state.push('math_block', 'math', 0)
     token.block = true; token.content = content.trim(); token.map = [startLine, nextLine + 1]
     state.line = nextLine + 1
     return true
   })
 
-  parser.renderer.rules.math_inline = (tokens, index) => katex.renderToString(tokens[index].content, { throwOnError: false, strict: 'warn' })
-  parser.renderer.rules.math_block = (tokens, index) => `<div class="katex-display-wrap">${katex.renderToString(tokens[index].content, { displayMode: true, throwOnError: false, strict: 'warn' })}</div>`
+  parser.renderer.rules.math_inline = (tokens, index) => katex.renderToString(tokens[index].content, katexOptions)
+  parser.renderer.rules.math_block = (tokens, index) => `<div class="katex-display-wrap">${katex.renderToString(tokens[index].content, { ...katexOptions, displayMode: true })}</div>`
 }
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: false })

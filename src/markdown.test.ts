@@ -25,6 +25,29 @@ describe('Markdown utilities', () => {
     expect(html).toContain('katex-display-wrap')
   })
 
+  it('supports common LaTeX commands and alternate math delimiters', () => {
+    const source = String.raw`Inline \(\boxed{I_0^2}\times\text{sample}\rightarrow
+      \quad\bigcirc\sin(\alpha^\circ)\frac{a_1}{b^2}\approx
+      \boldsymbol{v}\propto\nabla f\)
+
+\[
+\frac{x_1^2+\alpha}{2}\rightarrow\bigcirc
+\]
+
+\begin{align}
+a_1 &\approx b^2 \\
+\nabla f &\propto \boldsymbol{v}
+\end{align}`
+    const root = document.createElement('div')
+    root.innerHTML = renderMarkdown(source)
+    expect(root.querySelectorAll('.katex')).toHaveLength(3)
+    expect(root.querySelectorAll('.katex-display-wrap')).toHaveLength(2)
+    expect(root.querySelector('.katex-error')).toBeNull()
+    expect(root.textContent).toContain('α')
+    expect(root.textContent).toContain('∇')
+    expect(root.textContent).toContain('→')
+  })
+
   it('keeps Mermaid source available for deferred rendering', () => {
     const html = renderMarkdown('```mermaid\ngraph TD\n A-->B\n```')
     expect(html).toContain('language-mermaid')
