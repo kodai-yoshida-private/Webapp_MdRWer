@@ -30,22 +30,25 @@ test('その他メニューは外側をタップすると閉じる', async ({ pa
   await expect(page.locator('.action-menu')).toBeHidden()
 })
 
-test('タッチ端末の一覧を左スワイプで閉じる', async ({ page }, testInfo) => {
+for (const [label, selector] of [
+  ['フォルダ名', '.folder-row strong'],
+  ['文書タイトル', '.note-card strong']
+] as const) test(`${label}から左スワイプして一覧を閉じる`, async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'Desktop', 'タッチ端末だけで検証')
   await page.goto('./')
   const openButton = page.getByRole('button', { name: 'ノート一覧を開く' })
   if (await openButton.isVisible()) await openButton.click()
   const sidebar = page.locator('#note-sidebar')
   await expect(sidebar).toBeVisible()
-  const noteCard = sidebar.locator('.note-card').first()
-  await expect(noteCard).toBeVisible()
-  const bounds = await noteCard.boundingBox()
-  if (!bounds) throw new Error('ノート項目の位置を取得できませんでした')
+  const swipeTarget = sidebar.locator(selector).first()
+  await expect(swipeTarget).toBeVisible()
+  const bounds = await swipeTarget.boundingBox()
+  if (!bounds) throw new Error(`${label}の位置を取得できませんでした`)
   const startX = bounds.x + bounds.width - 20
   const startY = bounds.y + bounds.height / 2
-  await noteCard.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'touch', clientX: startX, clientY: startY, bubbles: true })
-  await noteCard.dispatchEvent('pointermove', { pointerId: 1, pointerType: 'touch', clientX: startX - 190, clientY: startY + 4, bubbles: true })
-  await noteCard.dispatchEvent('pointerup', { pointerId: 1, pointerType: 'touch', clientX: startX - 190, clientY: startY + 4, bubbles: true })
+  await swipeTarget.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'touch', clientX: startX, clientY: startY, bubbles: true })
+  await swipeTarget.dispatchEvent('pointermove', { pointerId: 1, pointerType: 'touch', clientX: startX - 190, clientY: startY + 4, bubbles: true })
+  await swipeTarget.dispatchEvent('pointerup', { pointerId: 1, pointerType: 'touch', clientX: startX - 190, clientY: startY + 4, bubbles: true })
   await expect(sidebar).toBeHidden()
 })
 

@@ -82,6 +82,7 @@ export default function App() {
   const [sidebarSwipeOffset, setSidebarSwipeOffset] = useState(0)
   const touchStart = useRef<{ x: number; y: number; t: number } | null>(null)
   const sidebarSwipeStart = useRef<{ x: number; y: number; t: number; pointerId: number } | null>(null)
+  const sidebarTouchStart = useRef<{ x: number; y: number; t: number } | null>(null)
   const readerRef = useRef<HTMLElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const menuAnchorRef = useRef<HTMLDivElement>(null)
@@ -542,6 +543,43 @@ export default function App() {
     setSidebarSwipeOffset(0)
   }
 
+  const onSidebarTouchStart = (event: React.TouchEvent) => {
+    if (event.touches.length !== 1 || (!mobileList && !sidebarOpen)) return
+    sidebarTouchStart.current = {
+      x: event.touches[0].clientX,
+      y: event.touches[0].clientY,
+      t: Date.now()
+    }
+    setSidebarSwipeOffset(0)
+  }
+
+  const onSidebarTouchMove = (event: React.TouchEvent) => {
+    if (!sidebarTouchStart.current || event.touches.length !== 1) return
+    const dx = event.touches[0].clientX - sidebarTouchStart.current.x
+    const dy = event.touches[0].clientY - sidebarTouchStart.current.y
+    if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.1) {
+      setSidebarSwipeOffset(Math.max(-window.innerWidth, dx))
+    }
+  }
+
+  const onSidebarTouchEnd = (event: React.TouchEvent) => {
+    if (!sidebarTouchStart.current || event.changedTouches.length !== 1) return
+    const dx = event.changedTouches[0].clientX - sidebarTouchStart.current.x
+    const dy = event.changedTouches[0].clientY - sidebarTouchStart.current.y
+    const velocity = -dx / Math.max(1, Date.now() - sidebarTouchStart.current.t)
+    if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.1 && (Math.abs(dx) > 56 || velocity > .45)) {
+      if (mobileList) setMobileList(false)
+      else setSidebarOpen(false)
+    }
+    sidebarTouchStart.current = null
+    setSidebarSwipeOffset(0)
+  }
+
+  const cancelSidebarTouch = () => {
+    sidebarTouchStart.current = null
+    setSidebarSwipeOffset(0)
+  }
+
   const rememberScroll = () => {
     if (!active || !readerRef.current) return
     const top = readerRef.current.scrollTop
@@ -707,6 +745,10 @@ export default function App() {
         onPointerMove={onSidebarPointerMove}
         onPointerUp={onSidebarPointerUp}
         onPointerCancel={cancelSidebarSwipe}
+        onTouchStartCapture={onSidebarTouchStart}
+        onTouchMoveCapture={onSidebarTouchMove}
+        onTouchEndCapture={onSidebarTouchEnd}
+        onTouchCancelCapture={cancelSidebarTouch}
         style={{ '--sidebar-swipe-x': `${sidebarSwipeOffset}px` } as React.CSSProperties}
       >
         <div className="sidebar-head"><div><span className="eyebrow">LIBRARY</span><h1>ノート</h1></div><button className="icon-button mobile-only" onClick={() => setMobileList(false)} aria-label="閉じる"><X size={20} /></button></div>
